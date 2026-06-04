@@ -1,0 +1,42 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.47843,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "Gemini_Generated_Image_uz2tvbuz2tvbuz2t.png",
+          "name" : "Gemini_Generated_Image_uz2tvbuz2tvbuz2t",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.61,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
