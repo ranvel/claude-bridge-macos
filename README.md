@@ -60,16 +60,20 @@ have the `index-project` skill — offers to install it.
 > To run it like a normal app you can later wrap the built binary in a `.app`
 > bundle, but the raw executable is enough to use it.
 
-## Connect Claude Code
+## Connect an MCP client
 
-Start the server from the popover (it auto-starts by default), then:
+Start the server from the popover (it auto-starts by default). The server binds
+to **loopback only** (`127.0.0.1`) — nothing is exposed off-machine.
 
-```sh
-claude mcp add --transport sse --scope local claude-bridge http://127.0.0.1:19850/sse
-```
+Any MCP client that speaks the SSE transport can connect. 
 
-The popover shows the exact command with your current port and a copy button. The
-server binds to **loopback only** (`127.0.0.1`) — nothing is exposed off-machine.
+> **A note on Claude Code specifically:** Claude Code already has direct,
+> efficient access to the filesystem and its own tool suite. Routing those same
+> operations through Claude Bridge adds a network hop and a second layer of
+> tool dispatch for no practical benefit — it would be extraordinarily wasteful.
+> Claude Bridge is designed for MCP clients that *don't* have native filesystem
+> access, or for workflows where you want the scoped docs/ read-write surface
+> without granting broader permissions.
 
 ## Picking a project root
 
