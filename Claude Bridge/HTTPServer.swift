@@ -25,18 +25,11 @@ final class HTTPServer {
 
 	private var listener: NWListener?
 
-	// Active MCP sessions (minted at initialize, removed on DELETE or server stop).
-	// Session count may drift upward if clients disconnect without sending DELETE —
-	// this is a known limitation of in-memory sessions with no idle TTL. Treat the
-	// count as a soft "has anything connected" indicator, not a precise gauge.
-	private var activeSessions: Set<String> = []
-
 	/// Max POST body we'll buffer (16 MB).
 	private let maxBody = 16 * 1024 * 1024
 
 	// Callbacks (always delivered on the main thread).
 	var onStateChanged: ((Bool) -> Void)?
-	var onSessionsChanged: ((Int) -> Void)?
 	var onLog: ((String) -> Void)?
 
 	private(set) var isRunning = false
@@ -82,8 +75,6 @@ final class HTTPServer {
 		queue.async {
 			self.listener?.cancel()
 			self.listener = nil
-			self.activeSessions.removeAll()
-			self.emitSessions(0)
 			self.isRunning = false
 			self.emitState(false)
 		}
@@ -205,54 +196,16 @@ final class HTTPServer {
 			return
 		}
 
-		let method = obj["method"] as? String ?? ""
-
-		if method == "initialize" {
-			// initialize is the only request that skips session validation — it's
-			// how the client obtains a session ID in the first place. The routing
-			// layer mints the UUID here to keep MCPHandler session-ignorant.
-			let sessionId = UUID().uuidString
-			activeSessions.insert(sessionId)
-			emitSessions(activeSessions.count)
-			log("session initialized: \(sessionId)")
-
-			let result = handler.handle(obj)
-			respondJSON(conn, result: result, sessionId: sessionId)
-		} else {
-			// Leniency policy (single-user loopback server):
-			//
-			// - Missing Mcp-Session-Id: accepted (no 400). The spec says a server
-			//   that requires sessions SHOULD return 400, but for loopback this
-			//   avoids breaking minimal or odd clients.
-			// - Present but unknown/stale Mcp-Session-Id: 404, so the client knows
-			//   to reinitialize. An app restart invalidates all in-memory sessions;
-			//   the first post-restart request gets a 404, and the client's
-			//   spec-blessed recovery path is to reinitialize.
-			// - MCP-Protocol-Version header: accepted and ignored. The 2025-06-18
-			//   spec made this mandatory on post-init requests. If absent, the spec
-			//   says to default to 2025-03-26. We don't vary behavior by version,
-			//   so the value is irrelevant either way.
-			if let clientSession = req.headers["mcp-session-id"] {
-				guard activeSessions.contains(clientSession) else {
-					respond(conn, status: "404 Not Found", body: "unknown or stale session — reinitialize")
-					return
-				}
-			}
-
-			let result = handler.handle(obj)
-			respondJSON(conn, result: result, sessionId: req.headers["mcp-session-id"])
-		}
+		// Stateless transport: no session IDs, no validation gate. Every request
+		// is self-contained. Inbound Mcp-Session-Id headers (from clients that
+		// remember a previous session) are accepted and ignored — no 400, no 404.
+		// MCP-Protocol-Version is likewise accepted and ignored; we don't vary
+		// behavior by version.
+		let result = handler.handle(obj)
+		respondJSON(conn, result: result)
 	}
 
 	private func handleMCPDelete(_ req: HTTPRequest, conn: NWConnection) {
-		guard let sessionId = req.headers["mcp-session-id"],
-			  activeSessions.remove(sessionId) != nil else {
-			respond(conn, status: "404 Not Found", body: "unknown session")
-			return
-		}
-		emitSessions(activeSessions.count)
-		log("session terminated: \(sessionId)")
-
 		let head = "HTTP/1.1 204 No Content\r\n"
 			+ "Access-Control-Allow-Origin: *\r\n"
 			+ "Connection: close\r\n\r\n"
@@ -261,28 +214,22 @@ final class HTTPServer {
 
 	// MARK: - HTTP responses
 
-	private func respondJSON(_ conn: NWConnection, result: [String: Any]?, sessionId: String?) {
+	private func respondJSON(_ conn: NWConnection, result: [String: Any]?) {
 		if let result = result {
 			guard let data = try? JSONSerialization.data(withJSONObject: result) else {
 				respond(conn, status: "500 Internal Server Error", body: "failed to serialize response")
 				return
 			}
-			var head = "HTTP/1.1 200 OK\r\n"
+			let head = "HTTP/1.1 200 OK\r\n"
 				+ "Content-Type: application/json\r\n"
 				+ "Content-Length: \(data.count)\r\n"
 				+ "Access-Control-Allow-Origin: *\r\n"
-			if let sid = sessionId {
-				head += "Mcp-Session-Id: \(sid)\r\n"
-			}
-			head += "Connection: close\r\n\r\n"
+				+ "Connection: close\r\n\r\n"
 			sendRaw(conn, Data(head.utf8) + data, thenClose: true)
 		} else {
-			var head = "HTTP/1.1 202 Accepted\r\n"
+			let head = "HTTP/1.1 202 Accepted\r\n"
 				+ "Access-Control-Allow-Origin: *\r\n"
-			if let sid = sessionId {
-				head += "Mcp-Session-Id: \(sid)\r\n"
-			}
-			head += "Content-Length: 0\r\nConnection: close\r\n\r\n"
+				+ "Content-Length: 0\r\nConnection: close\r\n\r\n"
 			sendRaw(conn, Data(head.utf8), thenClose: true)
 		}
 	}
@@ -332,10 +279,6 @@ final class HTTPServer {
 
 	private func emitState(_ running: Bool) {
 		DispatchQueue.main.async { self.onStateChanged?(running) }
-	}
-
-	private func emitSessions(_ count: Int) {
-		DispatchQueue.main.async { self.onSessionsChanged?(count) }
 	}
 
 	private func log(_ msg: String) {

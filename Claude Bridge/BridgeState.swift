@@ -19,8 +19,6 @@ final class BridgeState: ObservableObject {
 	@Published var currentRoot: String?          // absolute path, or nil
 	@Published var recents: [String] = []         // most-recent-first, max 5
 	@Published var serverRunning = false
-	@Published var sessionCount = 0
-	@Published var docsExists = false             // does <root>/docs exist?
 	@Published var skillInstalled = false
 	@Published var lastLog = ""
 
@@ -85,7 +83,6 @@ final class BridgeState: ObservableObject {
 		let handler = MCPHandler(currentRoot: root)
 		let s = HTTPServer(port: port, handler: handler)
 		s.onStateChanged = { [weak self] running in self?.serverRunning = running }
-		s.onSessionsChanged = { [weak self] n in self?.sessionCount = n }
 		s.onLog = { [weak self] msg in self?.lastLog = msg }
 		server = s
 	}
@@ -116,17 +113,22 @@ final class BridgeState: ObservableObject {
 
 	// MARK: - Project root
 
-	/// Set the active project root (from the folder picker).
-	func selectRoot(_ path: String) {
+	/// Set the active project root. Returns `true` if docs/ exists and this root
+	/// wasn't already in recents (caller should present the consent alert).
+	@discardableResult
+	func selectRoot(_ path: String) -> Bool {
 		applyRoot(path, persist: true)
 	}
 
-	private func applyRoot(_ path: String, persist: Bool) {
+	@discardableResult
+	private func applyRoot(_ path: String, persist: Bool) -> Bool {
 		let expanded = (path as NSString).expandingTildeInPath
-		currentRoot = expanded
-		root.set(expanded)               // server reads from here, live
-		docsExists = FileManager.default.fileExists(
+		let wasKnown = recents.contains(expanded)
+		let docsPresent = FileManager.default.fileExists(
 			atPath: URL(fileURLWithPath: expanded).appendingPathComponent("docs").path)
+
+		currentRoot = expanded
+		root.set(expanded)
 
 		// MRU: dedupe, prepend, cap.
 		recents.removeAll { $0 == expanded }
@@ -139,6 +141,7 @@ final class BridgeState: ObservableObject {
 			d.set(recents, forKey: Key.recents)
 		}
 		refreshSkillStatus()
+		return !wasKnown && docsPresent
 	}
 
 	func clearRecents() {

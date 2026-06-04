@@ -38,7 +38,7 @@ struct ToolResult {
 
 struct Tools {
 	let root: URL
-	private var docsDir: URL { root.appendingPathComponent("docs") }
+	private var docsDir: URL { root.appendingPathComponent("docs", isDirectory: true) }
 	private var projectIndex: URL { root.appendingPathComponent("project-index.md") }
 
 	init(rootPath: String) {

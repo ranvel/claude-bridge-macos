@@ -130,7 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 		NSApp.activate(ignoringOtherApps: true)
 		let response = panel.runModal()
 		if response == .OK, let url = panel.url {
-			state.selectRoot(url.path)
+			if state.selectRoot(url.path) {
+				BridgeView.showDocsConsentAlert()
+			}
 		}
 	}
 

@@ -27,7 +27,7 @@ The server runs on a dedicated DispatchQueue (`surf.ranvel.ClaudeBridge.http`). 
 
 **Request flow:** `NWListener` accepts connection → `HTTPServer` parses raw HTTP (hand-rolled, not URLSession) → routes to `MCPHandler` for JSON-RPC dispatch → `Tools` executes the tool → response written as `200 OK` + JSON body on the same connection (no streaming, no SSE upgrade — all tools are single-request/single-response).
 
-**Session handling:** `HTTPServer` mints a UUID at `initialize` (the only request that skips session validation) and returns it via the `Mcp-Session-Id` response header. Subsequent requests echo it back. `MCPHandler` is session-ignorant — all session logic lives in the transport layer. Leniency policy: missing session ID is accepted (no 400); present-but-stale gets 404 so the client reinitializes. `MCP-Protocol-Version` header is accepted and ignored. These choices are documented in code comments.
+**Stateless transport:** The server is fully stateless — no `Mcp-Session-Id` is issued or validated. Every request is self-contained. Inbound session ID headers from clients that remember a previous session are accepted and ignored (no 400, no 404). `DELETE /mcp` returns 204 unconditionally. `MCP-Protocol-Version` header is accepted and ignored. This eliminates the "stale session" 404s that previously stranded clients on app restart.
 
 **Path safety model:** All file access goes through `PathSafety.safeResolve`, which canonicalizes paths and rejects anything that escapes the project root. Doc names resolve with `.md` fallback. Binary extensions and large files (>5MB) are skipped. Search caps at 50 results.
 

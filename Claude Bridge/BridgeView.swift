@@ -27,7 +27,6 @@ struct BridgeView: View {
 				header
 				Divider()
 				projectSection
-				if state.docsExists { docsBanner }
 				if !state.recents.isEmpty { recentsSection }
 				Divider()
 				skillSection
@@ -66,7 +65,7 @@ struct BridgeView: View {
 					.fill(state.serverRunning ? Color.green : Color.secondary)
 					.frame(width: 8, height: 8)
 				Text(state.serverRunning
-					? "Listening on port \(state.port) · \(state.sessionCount) session(s)"
+					? "Listening on port \(state.port)"
 					: "Stopped")
 					.font(.caption)
 					.foregroundColor(.secondary)
@@ -97,17 +96,6 @@ struct BridgeView: View {
 		}
 	}
 
-	private var docsBanner: some View {
-		HStack(alignment: .top, spacing: 8) {
-			Text("📂")
-			Text("This project already has a **docs/** folder. It will be shared with Claude, who gets **read *and* write** access (create, overwrite, update, delete).")
-				.font(.caption)
-		}
-		.padding(10)
-		.background(Color.yellow.opacity(0.15))
-		.cornerRadius(8)
-	}
-
 	// MARK: - Recents
 
 	private var recentsSection: some View {
@@ -125,7 +113,9 @@ struct BridgeView: View {
 			}
 			ForEach(state.recents, id: \.self) { path in
 				Button {
-					state.selectRoot(path)
+					if state.selectRoot(path) {
+						Self.showDocsConsentAlert()
+					}
 				} label: {
 					HStack(spacing: 8) {
 						Image(systemName: path == state.currentRoot ? "largecircle.fill.circle" : "circle")
@@ -271,5 +261,14 @@ struct BridgeView: View {
 			Text(label).font(.caption).foregroundColor(.secondary)
 			content()
 		}
+	}
+
+	static func showDocsConsentAlert() {
+		let alert = NSAlert()
+		alert.messageText = "docs/ folder access"
+		alert.informativeText = "Claude can read, create, overwrite, update, and delete files in this project's docs/ folder."
+		alert.addButton(withTitle: "OK")
+		alert.alertStyle = .informational
+		alert.runModal()
 	}
 }
