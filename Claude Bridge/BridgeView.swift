@@ -73,7 +73,6 @@ struct BridgeView: View {
 			}
 			if state.serverRunning {
 				copyRow(label: "Endpoint", value: state.mcpURL)
-				copyRow(label: "Claude Code", value: state.addCommand)
 			}
 		}
 	}

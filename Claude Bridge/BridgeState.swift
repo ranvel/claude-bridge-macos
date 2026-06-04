@@ -52,10 +52,6 @@ final class BridgeState: ObservableObject {
 
 	var mcpURL: String { "http://127.0.0.1:\(port)/mcp" }
 
-	var addCommand: String {
-		"claude mcp add --transport http --scope local claude-bridge \(mcpURL)"
-	}
-
 	var isFirstLaunch: Bool {
 		!UserDefaults.standard.bool(forKey: Key.launchedBefore)
 	}

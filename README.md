@@ -56,8 +56,6 @@ The app launches as an **accessory** (menu-bar only, no Dock icon). Look for the
 🌉 item in your menu bar. On first launch it pops open and — if you don't already
 have the `index-project` skill — offers to install it.
 
-> To run it like a normal app you can later wrap the built binary in a `.app`
-> bundle, but the raw executable is enough to use it.
 
 ## Connect an MCP client
 
