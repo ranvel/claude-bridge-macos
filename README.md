@@ -61,10 +61,27 @@ have the `index-project` skill — offers to install it.
 
 ## Connect an MCP client
 
-Start the server from the popover (it auto-starts by default). The server binds
-to **loopback only** (`127.0.0.1`) — nothing is exposed off-machine.
+Make sure the Claude Bridge menu-bar app is running and the server is started
+(look for the 🌉 icon in your menu bar — the popover should show a green dot
+and "Listening on port 19850").
 
-Any MCP client that speaks the Streamable HTTP transport can connect.
+Any MCP client that speaks the Streamable HTTP transport can connect. Add the
+following to your client's MCP server configuration (e.g. `mcp.json`):
+
+```json
+{
+  "claude-bridge": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote",
+      "http://127.0.0.1:19850/mcp",
+      "--transport",
+      "http-only"
+    ]
+  }
+}
+```
 
 > **A note on Claude Code specifically:** Claude Code already has direct,
 > efficient access to the filesystem and its own tool suite. Routing those same
