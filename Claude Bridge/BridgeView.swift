@@ -72,7 +72,7 @@ struct BridgeView: View {
 					.foregroundColor(.secondary)
 			}
 			if state.serverRunning {
-				copyRow(label: "SSE URL", value: state.sseURL)
+				copyRow(label: "Endpoint", value: state.mcpURL)
 				copyRow(label: "Claude Code", value: state.addCommand)
 			}
 		}

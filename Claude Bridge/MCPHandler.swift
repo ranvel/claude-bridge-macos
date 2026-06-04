@@ -11,7 +11,7 @@ import Foundation
 struct MCPHandler {
 	let currentRoot: CurrentRoot
 	let serverVersion = "1.0.0"
-	let protocolVersion = "2024-11-05"
+	let protocolVersion = "2025-06-18"
 
 	/// Handle one JSON-RPC message. Returns the response object to send back,
 	/// or nil for notifications (which get no response).

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Claude Bridge is a native macOS menu-bar app that serves nine MCP tools over HTTP+SSE on loopback. It's a Swift rewrite of a Python stdio server. The key differentiator: the project root is live, mutable server state — pick a new folder from the menu bar and all tool calls retarget without restarting anything.
+Claude Bridge is a native macOS menu-bar app that serves nine MCP tools over Streamable HTTP on loopback (protocol version 2025-06-18). It's a Swift rewrite of a Python stdio server. The key differentiator: the project root is live, mutable server state — pick a new folder from the menu bar and all tool calls retarget without restarting anything.
 
 **Do not connect Claude Code to this server as an MCP client.** Claude Code already has direct filesystem access; routing operations through Bridge adds a pointless network hop. This server is for MCP clients that lack native filesystem access.
 
@@ -13,11 +13,6 @@ Claude Bridge is a native macOS menu-bar app that serves nine MCP tools over HTT
 Xcode project (primary):
 ```sh
 xcodebuild -scheme "Claude Bridge" -configuration Debug build
-```
-
-Swift Package Manager (Package.swift exists but points at `Sources/ClaudeBridge/` which doesn't match the current source layout in `Claude Bridge/` — SPM build will fail until source paths are reconciled):
-```sh
-swift build          # won't work yet
 ```
 
 No external dependencies. Builds against Apple frameworks only: AppKit, SwiftUI, Network, Foundation.
@@ -30,9 +25,9 @@ All state flows through one object: `BridgeState` (@MainActor, ObservableObject)
 
 The server runs on a dedicated DispatchQueue (`surf.ranvel.ClaudeBridge.http`). The only shared state between the main thread and the server queue is `CurrentRoot` — a thread-safe holder protected by NSLock. The UI writes it; the server reads it.
 
-**Request flow:** `NWListener` accepts connection → `HTTPServer` parses raw HTTP (hand-rolled, not URLSession) → routes to `MCPHandler` for JSON-RPC dispatch → `Tools` executes the tool → result goes back as an SSE event on the session's open connection.
+**Request flow:** `NWListener` accepts connection → `HTTPServer` parses raw HTTP (hand-rolled, not URLSession) → routes to `MCPHandler` for JSON-RPC dispatch → `Tools` executes the tool → response written as `200 OK` + JSON body on the same connection (no streaming, no SSE upgrade — all tools are single-request/single-response).
 
-**SSE session lifecycle:** `GET /sse` opens a persistent connection, sends an `endpoint` event with the POST URL, starts a 15-second keepalive timer. `POST /messages?sessionId=<id>` delivers JSON-RPC, responds 202 immediately, then pushes the result over the matching SSE stream.
+**Session handling:** `HTTPServer` mints a UUID at `initialize` (the only request that skips session validation) and returns it via the `Mcp-Session-Id` response header. Subsequent requests echo it back. `MCPHandler` is session-ignorant — all session logic lives in the transport layer. Leniency policy: missing session ID is accepted (no 400); present-but-stale gets 404 so the client reinitializes. `MCP-Protocol-Version` header is accepted and ignored. These choices are documented in code comments.
 
 **Path safety model:** All file access goes through `PathSafety.safeResolve`, which canonicalizes paths and rejects anything that escapes the project root. Doc names resolve with `.md` fallback. Binary extensions and large files (>5MB) are skipped. Search caps at 50 results.
 

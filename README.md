@@ -1,7 +1,7 @@
 # Claude Bridge 🌉 (macOS menu-bar app)
 
 A native macOS menu-bar app that serves the **Claude Bridge** MCP tools over a
-local **HTTP + SSE** transport. It gives Claude (Claude Code, or any MCP client
+local **Streamable HTTP** transport. It gives Claude (Claude Code, or any MCP client
 that speaks the SSE transport) structured, scoped access to a project's docs and
 source files — and lets you **switch the active project root on the fly** without
 restarting anything.
@@ -49,8 +49,7 @@ No Homebrew, no external Swift packages — it builds against Apple frameworks o
 ```sh
 git clone <this-repo> claude-bridge
 cd claude-bridge
-swift build -c release
-.build/release/ClaudeBridge
+xcodebuild -scheme "Claude Bridge" -configuration Release build
 ```
 
 The app launches as an **accessory** (menu-bar only, no Dock icon). Look for the
@@ -65,7 +64,7 @@ have the `index-project` skill — offers to install it.
 Start the server from the popover (it auto-starts by default). The server binds
 to **loopback only** (`127.0.0.1`) — nothing is exposed off-machine.
 
-Any MCP client that speaks the SSE transport can connect. 
+Any MCP client that speaks the Streamable HTTP transport can connect.
 
 > **A note on Claude Code specifically:** Claude Code already has direct,
 > efficient access to the filesystem and its own tool suite. Routing those same
@@ -127,7 +126,7 @@ UI/
   BridgeView.swift    SwiftUI popover/window content
   SkillInstaller.swift  git clone/pull of the index-project skill
 Server/
-  HTTPServer.swift    Network.framework HTTP + SSE listener (loopback only)
+  HTTPServer.swift    Network.framework Streamable HTTP listener (loopback only)
   MCPHandler.swift    JSON-RPC 2.0 / MCP dispatch (initialize, tools/list, tools/call)
   Tools.swift         The nine tools + thread-safe CurrentRoot holder
   PathSafety.swift    Path-escape guards, doc-name resolution, skip rules
@@ -137,6 +136,6 @@ Server/
 
 - **Not sandboxed** — by design, so it can read arbitrary project folders you choose.
 - **Case-sensitive lookups**, exact-match, same as the Python original.
-- The HTTP/SSE transport is hand-rolled on `Network.framework` rather than pulled
-  from an SDK (keeps the dependency count at zero). If you hit a connection quirk,
-  that parser is the first place to look. 🔍
+- The Streamable HTTP transport is hand-rolled on `Network.framework` rather than
+  pulled from an SDK (keeps the dependency count at zero). If you hit a connection
+  quirk, that parser is the first place to look. 🔍

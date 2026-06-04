@@ -48,10 +48,10 @@ final class BridgeState: ObservableObject {
 		static let launchedBefore = "hasLaunchedBefore"
 	}
 
-	var sseURL: String { "http://127.0.0.1:\(port)/sse" }
+	var mcpURL: String { "http://127.0.0.1:\(port)/mcp" }
 
 	var addCommand: String {
-		"claude mcp add --transport sse --scope local claude-bridge \(sseURL)"
+		"claude mcp add --transport http --scope local claude-bridge \(mcpURL)"
 	}
 
 	var isFirstLaunch: Bool {

@@ -2,15 +2,15 @@
 //  HTTPServer.swift
 //  ClaudeBridge
 //
-//  A tiny, dependency-free HTTP/1.1 server on Network.framework that
-//  speaks the MCP HTTP+SSE transport:
+//  A dependency-free HTTP/1.1 server on Network.framework implementing
+//  the MCP Streamable HTTP transport (2025-06-18):
 //
-//    GET  /sse                      -> opens an SSE stream; first event is
-//                                      `endpoint` carrying the POST URL.
-//    POST /messages?sessionId=<id>  -> JSON-RPC in; 202 Accepted out; the
-//                                      JSON-RPC response is delivered over
-//                                      the matching SSE stream.
-//    GET  /health                   -> liveness check.
+//    POST   /mcp     -> JSON-RPC in; 200+JSON or 202 Accepted out.
+//                       No SSE upgrade — all tools are single-request/
+//                       single-response, so we never stream.
+//    GET    /mcp     -> 405 (no server-initiated streams).
+//    DELETE /mcp     -> terminate session, 204.
+//    GET    /health  -> liveness check.
 //
 //  Loopback only: non-local peers are rejected on accept.
 //
@@ -24,7 +24,12 @@ final class HTTPServer {
 	private let queue = DispatchQueue(label: "surf.ranvel.ClaudeBridge.http")
 
 	private var listener: NWListener?
-	private var sessions: [String: SSESession] = [:]
+
+	// Active MCP sessions (minted at initialize, removed on DELETE or server stop).
+	// Session count may drift upward if clients disconnect without sending DELETE —
+	// this is a known limitation of in-memory sessions with no idle TTL. Treat the
+	// count as a soft "has anything connected" indicator, not a precise gauge.
+	private var activeSessions: Set<String> = []
 
 	/// Max POST body we'll buffer (16 MB).
 	private let maxBody = 16 * 1024 * 1024
@@ -77,8 +82,7 @@ final class HTTPServer {
 		queue.async {
 			self.listener?.cancel()
 			self.listener = nil
-			for s in self.sessions.values { s.close() }
-			self.sessions.removeAll()
+			self.activeSessions.removeAll()
 			self.emitSessions(0)
 			self.isRunning = false
 			self.emitState(false)
@@ -152,33 +156,24 @@ final class HTTPServer {
 	// MARK: - Routing
 
 	private func dispatch(_ req: HTTPRequest, body: Data, conn: NWConnection) {
+		// Origin validation: reject non-local origins to block DNS-rebinding.
+		// Native HTTP clients (like Claude Code) typically omit Origin entirely,
+		// so absent = allowed; only browser-initiated requests carry Origin.
+		if let origin = req.headers["origin"], !isLocalOrigin(origin) {
+			respond(conn, status: "403 Forbidden", body: "non-local origin rejected")
+			return
+		}
+
 		switch (req.method, req.path) {
 
-		case ("GET", "/sse"):
-			let sid = UUID().uuidString
-			let session = SSESession(id: sid, connection: conn, queue: queue)
-			sessions[sid] = session
-			emitSessions(sessions.count)
-			log("SSE session opened: \(sid)")
+		case ("POST", "/mcp"):
+			handleMCPPost(req, body: body, conn: conn)
 
-			// Reclaim the session when this connection dies.
-			conn.stateUpdateHandler = { [weak self] state in
-				switch state {
-				case .failed, .cancelled:
-					self?.queue.async { self?.removeSession(sid) }
-				default:
-					break
-				}
-			}
-			session.sendHandshake()
+		case ("GET", "/mcp"):
+			respond(conn, status: "405 Method Not Allowed", body: "server does not support GET streaming")
 
-		case ("POST", "/messages"):
-			guard let sid = req.query["sessionId"], let session = sessions[sid] else {
-				respond(conn, status: "404 Not Found", body: "no such session")
-				return
-			}
-			handlePost(body: body, session: session)
-			respond(conn, status: "202 Accepted", body: "")
+		case ("DELETE", "/mcp"):
+			handleMCPDelete(req, conn: conn)
 
 		case ("GET", "/health"):
 			respond(conn, status: "200 OK", body: "claude-bridge ok")
@@ -186,7 +181,7 @@ final class HTTPServer {
 		case ("OPTIONS", _):
 			let head = "HTTP/1.1 204 No Content\r\n"
 				+ "Access-Control-Allow-Origin: *\r\n"
-				+ "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+				+ "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
 				+ "Access-Control-Allow-Headers: *\r\n"
 				+ "Content-Length: 0\r\nConnection: close\r\n\r\n"
 			sendRaw(conn, Data(head.utf8), thenClose: true)
@@ -196,33 +191,101 @@ final class HTTPServer {
 		}
 	}
 
-	private func handlePost(body: Data, session: SSESession) {
-		guard let obj = try? JSONSerialization.jsonObject(with: body) else { return }
+	// MARK: - MCP Streamable HTTP
 
-		// A single message, or a JSON-RPC batch.
-		if let single = obj as? [String: Any] {
-			deliver(handler.handle(single), to: session)
-		} else if let batch = obj as? [[String: Any]] {
-			for msg in batch { deliver(handler.handle(msg), to: session) }
+	private func handleMCPPost(_ req: HTTPRequest, body: Data, conn: NWConnection) {
+		guard let ct = req.headers["content-type"], ct.hasPrefix("application/json") else {
+			respond(conn, status: "415 Unsupported Media Type", body: "expected Content-Type: application/json")
+			return
+		}
+
+		// Single JSON-RPC object only — batching was removed in the 2025-06-18 spec.
+		guard let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+			respond(conn, status: "400 Bad Request", body: "invalid JSON or unexpected array")
+			return
+		}
+
+		let method = obj["method"] as? String ?? ""
+
+		if method == "initialize" {
+			// initialize is the only request that skips session validation — it's
+			// how the client obtains a session ID in the first place. The routing
+			// layer mints the UUID here to keep MCPHandler session-ignorant.
+			let sessionId = UUID().uuidString
+			activeSessions.insert(sessionId)
+			emitSessions(activeSessions.count)
+			log("session initialized: \(sessionId)")
+
+			let result = handler.handle(obj)
+			respondJSON(conn, result: result, sessionId: sessionId)
+		} else {
+			// Leniency policy (single-user loopback server):
+			//
+			// - Missing Mcp-Session-Id: accepted (no 400). The spec says a server
+			//   that requires sessions SHOULD return 400, but for loopback this
+			//   avoids breaking minimal or odd clients.
+			// - Present but unknown/stale Mcp-Session-Id: 404, so the client knows
+			//   to reinitialize. An app restart invalidates all in-memory sessions;
+			//   the first post-restart request gets a 404, and the client's
+			//   spec-blessed recovery path is to reinitialize.
+			// - MCP-Protocol-Version header: accepted and ignored. The 2025-06-18
+			//   spec made this mandatory on post-init requests. If absent, the spec
+			//   says to default to 2025-03-26. We don't vary behavior by version,
+			//   so the value is irrelevant either way.
+			if let clientSession = req.headers["mcp-session-id"] {
+				guard activeSessions.contains(clientSession) else {
+					respond(conn, status: "404 Not Found", body: "unknown or stale session — reinitialize")
+					return
+				}
+			}
+
+			let result = handler.handle(obj)
+			respondJSON(conn, result: result, sessionId: req.headers["mcp-session-id"])
 		}
 	}
 
-	private func deliver(_ response: [String: Any]?, to session: SSESession) {
-		guard let response = response else { return }   // notification: no reply
-		guard let data = try? JSONSerialization.data(withJSONObject: response),
-			let str = String(data: data, encoding: .utf8) else { return }
-		session.send(event: "message", data: str)
-	}
-
-	private func removeSession(_ id: String) {
-		if let s = sessions.removeValue(forKey: id) {
-			s.close()
-			log("SSE session closed: \(id)")
-			emitSessions(sessions.count)
+	private func handleMCPDelete(_ req: HTTPRequest, conn: NWConnection) {
+		guard let sessionId = req.headers["mcp-session-id"],
+			  activeSessions.remove(sessionId) != nil else {
+			respond(conn, status: "404 Not Found", body: "unknown session")
+			return
 		}
+		emitSessions(activeSessions.count)
+		log("session terminated: \(sessionId)")
+
+		let head = "HTTP/1.1 204 No Content\r\n"
+			+ "Access-Control-Allow-Origin: *\r\n"
+			+ "Connection: close\r\n\r\n"
+		sendRaw(conn, Data(head.utf8), thenClose: true)
 	}
 
 	// MARK: - HTTP responses
+
+	private func respondJSON(_ conn: NWConnection, result: [String: Any]?, sessionId: String?) {
+		if let result = result {
+			guard let data = try? JSONSerialization.data(withJSONObject: result) else {
+				respond(conn, status: "500 Internal Server Error", body: "failed to serialize response")
+				return
+			}
+			var head = "HTTP/1.1 200 OK\r\n"
+				+ "Content-Type: application/json\r\n"
+				+ "Content-Length: \(data.count)\r\n"
+				+ "Access-Control-Allow-Origin: *\r\n"
+			if let sid = sessionId {
+				head += "Mcp-Session-Id: \(sid)\r\n"
+			}
+			head += "Connection: close\r\n\r\n"
+			sendRaw(conn, Data(head.utf8) + data, thenClose: true)
+		} else {
+			var head = "HTTP/1.1 202 Accepted\r\n"
+				+ "Access-Control-Allow-Origin: *\r\n"
+			if let sid = sessionId {
+				head += "Mcp-Session-Id: \(sid)\r\n"
+			}
+			head += "Content-Length: 0\r\nConnection: close\r\n\r\n"
+			sendRaw(conn, Data(head.utf8), thenClose: true)
+		}
+	}
 
 	private func respond(_ conn: NWConnection, status: String, body: String) {
 		let bodyData = Data(body.utf8)
@@ -240,7 +303,7 @@ final class HTTPServer {
 		})
 	}
 
-	// MARK: - Loopback gate
+	// MARK: - Validation helpers
 
 	private func isLoopback(_ conn: NWConnection) -> Bool {
 		guard let remote = conn.currentPath?.remoteEndpoint else { return true }
@@ -255,6 +318,16 @@ final class HTTPServer {
 		return true
 	}
 
+	private func isLocalOrigin(_ origin: String) -> Bool {
+		let lower = origin.lowercased()
+		if lower == "null" { return true }
+		let stripped = lower
+			.replacingOccurrences(of: "https://", with: "")
+			.replacingOccurrences(of: "http://", with: "")
+			.split(separator: ":").first.map(String.init) ?? lower
+		return stripped == "localhost" || stripped == "127.0.0.1" || stripped == "[::1]"
+	}
+
 	// MARK: - Main-thread emitters
 
 	private func emitState(_ running: Bool) {
@@ -267,60 +340,6 @@ final class HTTPServer {
 
 	private func log(_ msg: String) {
 		DispatchQueue.main.async { self.onLog?(msg) }
-	}
-}
-
-// MARK: - SSE session
-
-/// One open `text/event-stream` connection plus a keepalive heartbeat.
-final class SSESession {
-	let id: String
-	private let connection: NWConnection
-	private let queue: DispatchQueue
-	private var keepalive: DispatchSourceTimer?
-
-	init(id: String, connection: NWConnection, queue: DispatchQueue) {
-		self.id = id
-		self.connection = connection
-		self.queue = queue
-	}
-
-	func sendHandshake() {
-		let head = "HTTP/1.1 200 OK\r\n"
-			+ "Content-Type: text/event-stream\r\n"
-			+ "Cache-Control: no-cache\r\n"
-			+ "Connection: keep-alive\r\n"
-			+ "Access-Control-Allow-Origin: *\r\n\r\n"
-		rawSend(Data(head.utf8))
-		// Tell the client where to POST its JSON-RPC requests.
-		send(event: "endpoint", data: "/messages?sessionId=\(id)")
-		startKeepalive()
-	}
-
-	func send(event: String, data: String) {
-		// Our payloads are single-line (compact JSON), so one data: line is fine.
-		let frame = "event: \(event)\ndata: \(data)\n\n"
-		rawSend(Data(frame.utf8))
-	}
-
-	private func startKeepalive() {
-		let t = DispatchSource.makeTimerSource(queue: queue)
-		t.schedule(deadline: .now() + 15, repeating: 15)
-		t.setEventHandler { [weak self] in
-			self?.rawSend(Data(": keepalive\n\n".utf8))
-		}
-		t.resume()
-		keepalive = t
-	}
-
-	private func rawSend(_ data: Data) {
-		connection.send(content: data, completion: .contentProcessed { _ in })
-	}
-
-	func close() {
-		keepalive?.cancel()
-		keepalive = nil
-		connection.cancel()
 	}
 }
 
