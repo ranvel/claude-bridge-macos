@@ -28,7 +28,9 @@ final class BridgeState: ObservableObject {
 	@Published var port: UInt16 = 19850
 	@Published var skillsDirectory = "~/.claude/skills"
 	@Published var skillFolderName = "index-project"
-	@Published var skillRepoURL = ""              // user fills this in
+	@Published var skillRepoURL = ""
+
+	static let defaultSkillRepoURL = "https://github.com/ranvel/index-project-skill.git"
 	@Published var autoStart = true
 
 	// MARK: - Plumbing
@@ -65,7 +67,8 @@ final class BridgeState: ObservableObject {
 		if let p = d.object(forKey: Key.port) as? Int, p > 0, p < 65536 { port = UInt16(p) }
 		if let s = d.string(forKey: Key.skillsDir) { skillsDirectory = s }
 		if let f = d.string(forKey: Key.skillFolder) { skillFolderName = f }
-		if let r = d.string(forKey: Key.skillRepo) { skillRepoURL = r }
+		let storedRepo = d.string(forKey: Key.skillRepo)
+		skillRepoURL = (storedRepo?.isEmpty ?? true) ? Self.defaultSkillRepoURL : storedRepo!
 		if d.object(forKey: Key.autoStart) != nil { autoStart = d.bool(forKey: Key.autoStart) }
 		recents = (d.array(forKey: Key.recents) as? [String]) ?? []
 

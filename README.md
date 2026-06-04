@@ -112,14 +112,13 @@ Because it's distributed as a GitHub repo, the installer is fully configurable i
 
 - **Skills directory** — where skills live (default `~/.claude/skills`)
 - **Skill folder name** — the subfolder to install into (default `index-project`)
-- **Skill repo URL** — the GitHub URL to clone *(you fill this in)*
+- **Skill repo URL** — the GitHub URL to clone (defaults to the
+  [index-project-skill](https://github.com/ranvel/index-project-skill.git) repo;
+  repoint it if you maintain your own fork)
 
 Install does a `git clone`; if the folder already exists it does a
 `git pull --ff-only` to update. The skill is considered installed when
 `<skills-dir>/<folder>/SKILL.md` exists. ✅
-
-> The repo URL is intentionally left blank — point it at whichever index-project
-> skill repo you want to track.
 
 ## Settings reference
 
@@ -129,7 +128,7 @@ Install does a `git clone`; if the folder already exists it does a
 | Auto-start server | on | Starts the SSE server at launch |
 | Skills directory | `~/.claude/skills` | Tilde is expanded |
 | Skill folder name | `index-project` | |
-| Skill repo URL | *(empty)* | Set before installing |
+| Skill repo URL | `ranvel/index-project-skill` | Repoint to use a different skill repo |
 
 All settings and your recents/current root persist via `UserDefaults`.
 

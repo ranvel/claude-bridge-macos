@@ -220,7 +220,7 @@ struct BridgeView: View {
 						.onSubmit { state.saveSkillSettings() }
 				}
 				labeledField("Skill repo URL") {
-					TextField("https://github.com/you/index-project-skill.git", text: $state.skillRepoURL)
+					TextField(BridgeState.defaultSkillRepoURL, text: $state.skillRepoURL)
 						.textFieldStyle(.roundedBorder)
 						.onSubmit { state.saveSkillSettings() }
 				}
