@@ -130,7 +130,7 @@ struct Tools {
 					"type": "object",
 					"properties": [
 						"pattern": ["type": "string", "description": "Search pattern (regex supported)"],
-						"path": ["type": "string", "description": "Subdirectory to search in (relative to project root, empty = all)", "default": ""],
+						"path": ["type": "string", "description": "File or directory to search in (relative to project root, empty = all)", "default": ""],
 						"case_sensitive": ["type": "boolean", "description": "Whether search is case-sensitive (default: true)", "default": true],
 					],
 					"required": ["pattern"],
@@ -360,7 +360,8 @@ struct Tools {
 		let fm = FileManager.default
 
 		let searchRoot = searchPathStr.isEmpty ? root : try PathSafety.safeResolve(base: root, relative: searchPathStr)
-		guard fm.fileExists(atPath: searchRoot.path) else {
+		var isDir: ObjCBool = false
+		guard fm.fileExists(atPath: searchRoot.path, isDirectory: &isDir) else {
 			return ToolResult("❌ Path not found: \(searchPathStr)", isError: true)
 		}
 
@@ -371,17 +372,32 @@ struct Tools {
 
 		// Gather candidate files (sorted for deterministic output).
 		var files: [URL] = []
-		if let en = fm.enumerator(at: searchRoot, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) {
-			for case let url as URL in en {
-				if url.pathComponents.contains(where: { Skip.dirs.contains($0) }) { continue }
-				let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-				guard vals?.isRegularFile == true else { continue }
-				if Skip.extensions.contains("." + url.pathExtension.lowercased()) { continue }
-				if (vals?.fileSize ?? 0) > Skip.maxReadSize { continue }
-				files.append(url)
+		if isDir.boolValue {
+			// Directory: walk it. (FileManager.enumerator returns nil for a file URL,
+			// which is what previously made file-scoped searches silently return nothing.)
+			if let en = fm.enumerator(at: searchRoot, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) {
+				for case let url as URL in en {
+					if url.pathComponents.contains(where: { Skip.dirs.contains($0) }) { continue }
+					let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+					guard vals?.isRegularFile == true else { continue }
+					if Skip.extensions.contains("." + url.pathExtension.lowercased()) { continue }
+					if (vals?.fileSize ?? 0) > Skip.maxReadSize { continue }
+					files.append(url)
+				}
 			}
+			files.sort { $0.path < $1.path }
+		} else {
+			// File: search just this one file. The user pointed at it explicitly, so
+			// surface a clear error if it's unreadable rather than an ambiguous
+			// "No matches". Feeds the same match loop below as the directory branch.
+			if Skip.extensions.contains("." + searchRoot.pathExtension.lowercased()) {
+				return ToolResult("❌ Binary/compiled file, cannot search: \(searchPathStr)", isError: true)
+			}
+			if (try? fileSize(searchRoot)) ?? 0 > Skip.maxReadSize {
+				return ToolResult(tooLarge(searchRoot), isError: true)
+			}
+			files = [searchRoot]
 		}
-		files.sort { $0.path < $1.path }
 
 		var results: [String] = []
 		outer: for f in files {
