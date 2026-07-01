@@ -67,7 +67,7 @@ struct Tools {
 			],
 			[
 				"name": "write_doc",
-				"description": "Create or overwrite a document in docs/. Subdirectories are created automatically. If no extension is given, .md is appended.",
+				"description": "Create a new document in docs/. Fails if the document already exists — use update_doc to modify it, or delete_doc + write_doc to replace it entirely. Subdirectories are created automatically. If no extension is given, .md is appended.",
 				"inputSchema": [
 					"type": "object",
 					"properties": [
@@ -219,11 +219,12 @@ struct Tools {
 		let fm = FileManager.default
 
 		try fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
-		let existed = fm.fileExists(atPath: path.path)
-		try content.data(using: .utf8)?.write(to: path)
 		let rel = PathSafety.relativePath(of: path, under: docsDir)
-		let verb = existed ? "Updated" : "Created"
-		return ToolResult("✅ \(verb) docs/\(rel) (\(content.unicodeScalars.count) chars)")
+		if fm.fileExists(atPath: path.path) {
+			return ToolResult("❌ docs/\(rel) already exists. Use update_doc to modify it, or delete_doc first to replace it.", isError: true)
+		}
+		try content.data(using: .utf8)?.write(to: path)
+		return ToolResult("✅ Created docs/\(rel) (\(content.unicodeScalars.count) chars)")
 	}
 
 	private func updateDoc(_ args: [String: Any]) throws -> ToolResult {
