@@ -1,0 +1,9 @@
+{
+	"conductor_manifest": 1,
+	"bundle_id": "com.ranvel.Claude-Bridge",
+	"version": "1.3",
+	"build": "5",
+	"url": "https://github.com/ranvel/claude-bridge-macos/releases/download/v1.3/ClaudeBridge-1.3.dmg",
+	"sha256": "13e644be7aa8f956729bab687c345c1297951f375df02465933c333afb068644",
+	"min_system_version": "15.7"
+}
