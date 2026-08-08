@@ -1,0 +1,5 @@
+{
+	"conductor": 1,
+	"update_url": "https://raw.githubusercontent.com/ranvel/claude-bridge-macos/main/manifest.json",
+	"vendor_url": "https://github.com/ranvel/claude-bridge-macos"
+}

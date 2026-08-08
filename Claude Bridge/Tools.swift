@@ -56,11 +56,13 @@ struct Tools {
 			],
 			[
 				"name": "read_doc",
-				"description": "Read a document from docs/ by name. Case-sensitive. You can omit the .md extension. Examples: 'marketing', 'branding/colors.md'",
+				"description": "Read a document from docs/ by name. Case-sensitive. You can omit the .md extension. Examples: 'marketing', 'branding/colors.md'. Supports ranged reads via offset/limit for large documents.",
 				"inputSchema": [
 					"type": "object",
 					"properties": [
 						"name": ["type": "string", "description": "Document name or path relative to docs/"],
+						"offset": ["type": "integer", "description": "1-based line number to start reading from (default: 1)"],
+						"limit": ["type": "integer", "description": "Maximum number of lines to return (default: whole file)"],
 					],
 					"required": ["name"],
 				],
@@ -79,15 +81,27 @@ struct Tools {
 			],
 			[
 				"name": "update_doc",
-				"description": "Update a section of an existing document in docs/. Finds old_text and replaces it with new_text. old_text must match exactly (case-sensitive).",
+				"description": "Update an existing document in docs/. Either pass a single old_text/new_text pair, or pass edits (an array of {old_text, new_text}) to apply several replacements in one call. Edits apply in array order, each against the result of the previous — an earlier edit can change whether a later old_text still matches. All edits are validated before anything is written: every old_text must match exactly once (case-sensitive) or the whole batch is rejected and the document is left untouched.",
 				"inputSchema": [
 					"type": "object",
 					"properties": [
 						"name": ["type": "string", "description": "Document name or path relative to docs/"],
-						"old_text": ["type": "string", "description": "Exact text to find (must appear exactly once)"],
-						"new_text": ["type": "string", "description": "Replacement text"],
+						"old_text": ["type": "string", "description": "Exact text to find (must appear exactly once). Use with new_text; mutually exclusive with edits."],
+						"new_text": ["type": "string", "description": "Replacement text. Use with old_text; mutually exclusive with edits."],
+						"edits": [
+							"type": "array",
+							"description": "Batch of edits, applied sequentially. Mutually exclusive with old_text/new_text.",
+							"items": [
+								"type": "object",
+								"properties": [
+									"old_text": ["type": "string", "description": "Exact text to find (must appear exactly once at its turn in the sequence)"],
+									"new_text": ["type": "string", "description": "Replacement text"],
+								],
+								"required": ["old_text", "new_text"],
+							],
+						],
 					],
-					"required": ["name", "old_text", "new_text"],
+					"required": ["name"],
 				],
 			],
 			[
@@ -103,11 +117,13 @@ struct Tools {
 			],
 			[
 				"name": "read_file",
-				"description": "Read any file from the project (read-only). Path is relative to project root. Case-sensitive.",
+				"description": "Read any file from the project (read-only). Path is relative to project root. Case-sensitive. Supports ranged reads via offset/limit — required for files over the size cap. Binary files return metadata (type, size, mtime) instead of content.",
 				"inputSchema": [
 					"type": "object",
 					"properties": [
 						"path": ["type": "string", "description": "File path relative to project root"],
+						"offset": ["type": "integer", "description": "1-based line number to start reading from (default: 1)"],
+						"limit": ["type": "integer", "description": "Maximum number of lines to return (default: whole file)"],
 					],
 					"required": ["path"],
 				],
@@ -125,7 +141,7 @@ struct Tools {
 			],
 			[
 				"name": "search_files",
-				"description": "Search for a pattern across project files (like grep). Returns matching lines with file paths and line numbers. Searches text files only, skips binaries and build artifacts.",
+				"description": "Search for a pattern across project files (like grep). Returns matching lines with file paths and line numbers. Binary file content is not searched, but binary filenames are matched against the pattern (reported as name matches), and a footer reports how much binary content was skipped.",
 				"inputSchema": [
 					"type": "object",
 					"properties": [
@@ -204,12 +220,8 @@ struct Tools {
 		guard fm.fileExists(atPath: path.path) else {
 			return ToolResult("❌ Document not found: \(name)\nUse list_docs to see available documents.", isError: true)
 		}
-		if try fileSize(path) > Skip.maxReadSize {
-			return ToolResult(tooLarge(path), isError: true)
-		}
-		let content = try String(contentsOf: path, encoding: .utf8)
 		let rel = PathSafety.relativePath(of: path, under: docsDir)
-		return ToolResult("📄 docs/\(rel)\n\n\(content)")
+		return try textFileResult(path: path, display: "docs/\(rel)", range: readRange(args))
 	}
 
 	private func writeDoc(_ args: [String: Any]) throws -> ToolResult {
@@ -229,8 +241,6 @@ struct Tools {
 
 	private func updateDoc(_ args: [String: Any]) throws -> ToolResult {
 		let name = try string(args, "name")
-		let oldText = try string(args, "old_text")
-		let newText = try string(args, "new_text")
 		let path = try PathSafety.resolveDocName(docsDir: docsDir, name: name)
 		let fm = FileManager.default
 		guard fm.fileExists(atPath: path.path) else {
@@ -239,21 +249,65 @@ struct Tools {
 
 		let content = try String(contentsOf: path, encoding: .utf8)
 		let rel = PathSafety.relativePath(of: path, under: docsDir)
-		let count = Self.occurrences(of: oldText, in: content)
 
-		if count == 0 {
-			return ToolResult("❌ old_text not found in docs/\(rel)", isError: true)
-		}
-		if count > 1 {
-			return ToolResult("❌ old_text appears \(count) times (must be unique). Add more context to disambiguate.", isError: true)
+		// Exactly one of (old_text+new_text) or edits.
+		let editsArg = args["edits"] as? [[String: Any]]
+		let hasSinglePair = args["old_text"] != nil || args["new_text"] != nil
+		if editsArg != nil && hasSinglePair {
+			return ToolResult("❌ Provide either old_text/new_text or edits, not both.", isError: true)
 		}
 
-		guard let range = content.range(of: oldText) else {
-			return ToolResult("❌ old_text not found in docs/\(rel)", isError: true)
+		var edits: [(old: String, new: String)] = []
+		let isBatch = editsArg != nil
+		if let editsArg {
+			guard !editsArg.isEmpty else {
+				return ToolResult("❌ edits must contain at least one edit.", isError: true)
+			}
+			for (i, e) in editsArg.enumerated() {
+				guard let old = e["old_text"] as? String, let new = e["new_text"] as? String else {
+					return ToolResult("❌ edit \(i + 1) of \(editsArg.count): each edit needs old_text and new_text strings.", isError: true)
+				}
+				edits.append((old, new))
+			}
+		} else {
+			// Single-pair path: same required-argument errors as before.
+			edits.append((try string(args, "old_text"), try string(args, "new_text")))
 		}
-		let updated = content.replacingCharacters(in: range, with: newText)
-		try updated.data(using: .utf8)?.write(to: path)
-		return ToolResult("✅ Updated docs/\(rel) (replaced \(oldText.unicodeScalars.count) chars → \(newText.unicodeScalars.count) chars)")
+
+		// Validate and apply sequentially against an in-memory copy — each edit
+		// sees the result of the previous. Nothing touches disk unless every
+		// edit matches exactly once.
+		var working = content
+		for (i, edit) in edits.enumerated() {
+			let count = Self.occurrences(of: edit.old, in: working)
+			let label = isBatch ? "edit \(i + 1) of \(edits.count): old_text" : "old_text"
+			let suffix = isBatch ? " No changes applied." : ""
+			if count == 0 {
+				return ToolResult("❌ \(label) not found in docs/\(rel)\(isBatch ? "." : "")\(suffix)", isError: true)
+			}
+			if count > 1 {
+				return ToolResult("❌ \(label) appears \(count) times (must be unique). Add more context to disambiguate.\(suffix)", isError: true)
+			}
+			guard let range = working.range(of: edit.old) else {
+				return ToolResult("❌ \(label) not found in docs/\(rel)\(isBatch ? "." : "")\(suffix)", isError: true)
+			}
+			working = working.replacingCharacters(in: range, with: edit.new)
+		}
+		try working.data(using: .utf8)?.write(to: path)
+
+		if !isBatch {
+			let e = edits[0]
+			return ToolResult("✅ Updated docs/\(rel) (replaced \(e.old.unicodeScalars.count) chars → \(e.new.unicodeScalars.count) chars)")
+		}
+		var lines = ["✅ Updated docs/\(rel) (\(edits.count) edits)"]
+		var totalOld = 0, totalNew = 0
+		for (i, e) in edits.enumerated() {
+			let o = e.old.unicodeScalars.count, n = e.new.unicodeScalars.count
+			totalOld += o; totalNew += n
+			lines.append("  edit \(i + 1): replaced \(o) chars → \(n) chars")
+		}
+		lines.append("  total: replaced \(totalOld) chars → \(totalNew) chars")
+		return ToolResult(lines.joined(separator: "\n"))
 	}
 
 	private func deleteDoc(_ args: [String: Any]) throws -> ToolResult {
@@ -282,17 +336,17 @@ struct Tools {
 		if isDir.boolValue {
 			return ToolResult("❌ Path is a directory. Use list_directory instead.", isError: true)
 		}
-		if try fileSize(path) > Skip.maxReadSize {
-			return ToolResult(tooLarge(path), isError: true)
-		}
-		if Skip.extensions.contains("." + path.pathExtension.lowercased()) {
-			return ToolResult("❌ Binary/compiled file, cannot read: \(rawPath)", isError: true)
-		}
-		guard let content = try? String(contentsOf: path, encoding: .utf8) else {
-			return ToolResult("❌ File appears to be binary: \(rawPath)", isError: true)
-		}
+
 		let rel = PathSafety.relativePath(of: path, under: root)
-		return ToolResult("📄 \(rel)\n\n\(content)")
+
+		// Binary files get a metadata response, not a dead-end error. One sniff
+		// buffer serves both the NUL check and magic-number type detection.
+		let sniff = PathSafety.sniff(path) ?? Data()
+		if PathSafety.isBinaryExtension(path) || PathSafety.looksBinary(sniff) {
+			return binaryMetadata(path, rel: rel, sniff: sniff)
+		}
+
+		return try textFileResult(path: path, display: rel, range: readRange(args))
 	}
 
 	private func listDirectory(_ args: [String: Any]) throws -> ToolResult {
@@ -347,7 +401,9 @@ struct Tools {
 				entries.append("\(indent)📂 \(rel)/  (\(childCount) items)")
 				listDirRecursive(base: base, current: item, maxDepth: maxDepth, currentDepth: currentDepth + 1, into: &entries)
 			} else {
-				if Skip.extensions.contains("." + item.pathExtension.lowercased()) { continue }
+				// compiledExtensions, not the full binary set: listings must keep
+				// showing assets (.png, .pdf, …) exactly as before.
+				if Skip.compiledExtensions.contains("." + item.pathExtension.lowercased()) { continue }
 				let size = (try? item.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
 				entries.append(String(format: "%@📄 %@  (%.1f KB)", indent, rel, Double(size) / 1024.0))
 			}
@@ -371,8 +427,10 @@ struct Tools {
 			return ToolResult("❌ Invalid regex: \(pattern)", isError: true)
 		}
 
-		// Gather candidate files (sorted for deterministic output).
-		var files: [URL] = []
+		// Gather candidate files with sizes (sorted for deterministic output).
+		// Binary classification happens in the match loop, not here — binaries
+		// stay in the candidate list so their names can still match.
+		var files: [(url: URL, size: Int)] = []
 		if isDir.boolValue {
 			// Directory: walk it. (FileManager.enumerator returns nil for a file URL,
 			// which is what previously made file-scoped searches silently return nothing.)
@@ -381,34 +439,57 @@ struct Tools {
 					if url.pathComponents.contains(where: { Skip.dirs.contains($0) }) { continue }
 					let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
 					guard vals?.isRegularFile == true else { continue }
-					if Skip.extensions.contains("." + url.pathExtension.lowercased()) { continue }
-					if (vals?.fileSize ?? 0) > Skip.maxReadSize { continue }
-					files.append(url)
+					files.append((url, vals?.fileSize ?? 0))
 				}
 			}
-			files.sort { $0.path < $1.path }
+			files.sort { $0.url.path < $1.url.path }
 		} else {
-			// File: search just this one file. The user pointed at it explicitly, so
-			// surface a clear error if it's unreadable rather than an ambiguous
-			// "No matches". Feeds the same match loop below as the directory branch.
-			if Skip.extensions.contains("." + searchRoot.pathExtension.lowercased()) {
-				return ToolResult("❌ Binary/compiled file, cannot search: \(searchPathStr)", isError: true)
-			}
-			if (try? fileSize(searchRoot)) ?? 0 > Skip.maxReadSize {
-				return ToolResult(tooLarge(searchRoot), isError: true)
-			}
-			files = [searchRoot]
+			// File: search just this one file. Feeds the same match loop below,
+			// so a binary file gets the honest name-match/skip treatment instead
+			// of an error.
+			files = [(searchRoot, (try? fileSize(searchRoot)) ?? 0)]
+		}
+
+		func matches(_ line: String) -> Bool {
+			let ns = line as NSString
+			return regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: ns.length)) != nil
 		}
 
 		var results: [String] = []
+		var skippedBinaryCount = 0, skippedBinaryBytes = 0
+		var skippedLargeCount = 0, skippedLargeBytes = 0
 		outer: for f in files {
-			guard let text = try? String(contentsOf: f, encoding: .utf8) else { continue }
-			let rel = PathSafety.relativePath(of: f, under: root)
+			let rel = PathSafety.relativePath(of: f.url, under: root)
+
+			// Classify: extension first (free), NUL sniff second (8 KB). Content
+			// of binaries is never read, but their names still count as results.
+			func recordBinary() {
+				skippedBinaryCount += 1
+				skippedBinaryBytes += f.size
+				if matches(rel) {
+					results.append("  📦 \(rel)  (binary — name match)")
+				}
+			}
+			if PathSafety.isBinary(f.url) {
+				recordBinary()
+				if results.count >= Skip.maxSearchResults { break outer }
+				continue
+			}
+			if f.size > Skip.maxReadSize {
+				skippedLargeCount += 1
+				skippedLargeBytes += f.size
+				continue
+			}
+			guard let text = try? String(contentsOf: f.url, encoding: .utf8) else {
+				// Passed the sniff but isn't UTF-8 — treat like a binary skip.
+				recordBinary()
+				if results.count >= Skip.maxSearchResults { break outer }
+				continue
+			}
 			var lineNo = 0
 			text.enumerateLines { line, stop in
 				lineNo += 1
-				let ns = line as NSString
-				if regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: ns.length)) != nil {
+				if matches(line) {
 					results.append("  \(rel):\(lineNo)  \(line.trimmingCharacters(in: .whitespaces))")
 					if results.count >= Skip.maxSearchResults { stop = true }
 				}
@@ -416,12 +497,21 @@ struct Tools {
 			if results.count >= Skip.maxSearchResults { break outer }
 		}
 
+		// Honesty footer: report what was not looked at.
+		var footer = ""
+		if skippedBinaryCount > 0 {
+			footer += "\n(skipped content of \(skippedBinaryCount) binary file\(skippedBinaryCount == 1 ? "" : "s") — \(Self.formatMB(skippedBinaryBytes)) not searched)"
+		}
+		if skippedLargeCount > 0 {
+			footer += "\n(skipped \(skippedLargeCount) file\(skippedLargeCount == 1 ? "" : "s") over the read-size cap — \(Self.formatMB(skippedLargeBytes)) not searched)"
+		}
+
 		if results.isEmpty {
-			return ToolResult("🔍 No matches for: \(pattern)")
+			return ToolResult("🔍 No matches for: \(pattern)" + footer)
 		}
 		let truncated = results.count >= Skip.maxSearchResults ? " (truncated)" : ""
 		let header = "🔍 \(results.count) match(es) for '\(pattern)'\(truncated):\n"
-		return ToolResult(header + results.joined(separator: "\n"))
+		return ToolResult(header + results.joined(separator: "\n") + footer)
 	}
 
 	private func getProjectIndex() throws -> ToolResult {
@@ -447,10 +537,119 @@ struct Tools {
 		return (attrs[.size] as? Int) ?? 0
 	}
 
-	private func tooLarge(_ url: URL) -> String {
+	private func tooLarge(_ url: URL, hint: Bool = false) -> String {
 		let kb = (try? Double(fileSize(url)) / 1024.0) ?? 0
 		let maxKB = Double(Skip.maxReadSize) / 1024.0
-		return String(format: "❌ File too large: %.0f KB (max %.0f KB)", kb, maxKB)
+		var msg = String(format: "❌ File too large: %.0f KB (max %.0f KB)", kb, maxKB)
+		if hint {
+			msg += ". Use offset/limit to read a range, e.g. offset=1, limit=500."
+		}
+		return msg
+	}
+
+	private static func formatMB(_ bytes: Int) -> String {
+		String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
+	}
+
+	// MARK: - Ranged reads
+
+	private struct ReadRange {
+		let offset: Int   // 1-based first line
+		let limit: Int?   // nil = to EOF
+	}
+
+	/// Parse optional offset/limit arguments. Returns nil when neither is given
+	/// (plain whole-file read, unchanged behavior).
+	private func readRange(_ args: [String: Any]) throws -> ReadRange? {
+		let offset = args["offset"] as? Int
+		let limit = args["limit"] as? Int
+		if offset == nil && limit == nil { return nil }
+		if let o = offset, o < 1 { throw BridgeError("offset must be >= 1 (got \(o))") }
+		if let l = limit, l < 1 { throw BridgeError("limit must be >= 1 (got \(l))") }
+		return ReadRange(offset: offset ?? 1, limit: limit)
+	}
+
+	/// Produce the result for a text file: plain whole-file read when no range
+	/// is given (and the file fits), otherwise a line-ranged read. Large files
+	/// require a range; ranged reads stream incrementally and never load the
+	/// whole file into memory.
+	private func textFileResult(path: URL, display: String, range: ReadRange?) throws -> ToolResult {
+		guard let range else {
+			if try fileSize(path) > Skip.maxReadSize {
+				return ToolResult(tooLarge(path, hint: true), isError: true)
+			}
+			let content = try String(contentsOf: path, encoding: .utf8)
+			return ToolResult("📄 \(display)\n\n\(content)")
+		}
+		return try rangedRead(path: path, display: display, range: range)
+	}
+
+	/// Stream the file line by line, collecting only the requested range.
+	/// Bounded memory: 64 KB chunks in, at most maxReadSize of collected output.
+	private func rangedRead(path: URL, display: String, range: ReadRange) throws -> ToolResult {
+		guard let fh = try? FileHandle(forReadingFrom: path) else {
+			throw BridgeError("Cannot open file: \(display)")
+		}
+		defer { try? fh.close() }
+
+		let lastWanted = range.limit.map { range.offset + $0 - 1 }
+		var selected: [String] = []
+		var selectedBytes = 0
+		var outputCapped = false
+		var lineNo = 0
+		var lastCollected = 0
+
+		func take(_ lineData: Data) {
+			lineNo += 1
+			guard lineNo >= range.offset, lastWanted.map({ lineNo <= $0 }) ?? true, !outputCapped else { return }
+			var d = lineData
+			if d.last == 0x0D { d = d.dropLast() }   // CRLF
+			if selectedBytes + d.count > Skip.maxReadSize {
+				outputCapped = true
+				return
+			}
+			selected.append(String(decoding: d, as: UTF8.self))
+			selectedBytes += d.count
+			lastCollected = lineNo
+		}
+
+		var carry = Data()
+		let newline = Data([0x0A])
+		while let chunk = try? fh.read(upToCount: 64 * 1024), !chunk.isEmpty {
+			carry.append(chunk)
+			while let nl = carry.range(of: newline) {
+				take(carry.subdata(in: carry.startIndex..<nl.lowerBound))
+				carry.removeSubrange(carry.startIndex..<nl.upperBound)
+			}
+		}
+		if !carry.isEmpty { take(carry) }
+
+		if range.offset > lineNo {
+			return ToolResult("❌ offset \(range.offset) is past end of file: \(display) has \(lineNo) line\(lineNo == 1 ? "" : "s").", isError: true)
+		}
+
+		let end = lastCollected
+		var out = "📄 \(display)  (lines \(range.offset)–\(end) of \(lineNo))\n\n"
+		out += selected.joined(separator: "\n")
+		if outputCapped {
+			out += String(format: "\n\n(output capped at %.0f KB — narrow the range to read further)", Double(Skip.maxReadSize) / 1024.0)
+		} else if end < lineNo {
+			out += "\n\n(\(lineNo - end) more line\(lineNo - end == 1 ? "" : "s") — continue with offset=\(end + 1))"
+		}
+		return ToolResult(out)
+	}
+
+	/// Metadata response for a binary file: type (magic numbers), size, mtime.
+	private func binaryMetadata(_ url: URL, rel: String, sniff: Data) -> ToolResult {
+		let size = (try? fileSize(url)) ?? 0
+		let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+		let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+		return ToolResult("""
+		📦 \(rel)
+			type: \(PathSafety.binaryTypeDescription(sniff))
+			size: \(String(format: "%.1f KB", Double(size) / 1024.0))
+			modified: \(Self.utcStamp(mtime))
+		""")
 	}
 
 	private static func occurrences(of needle: String, in haystack: String) -> Int {

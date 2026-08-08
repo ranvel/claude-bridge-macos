@@ -32,6 +32,21 @@ five project roots** for one-click switching. 🗂️
 Same safety rails as the Python version: path-escape protection, binary-file
 skipping, a 5 MB per-file read cap, and a 50-result search cap.
 
+## Install
+
+**Recommended:** download the signed, notarized DMG from
+[GitHub Releases](https://github.com/ranvel/claude-bridge-macos/releases),
+drag **Claude Bridge.app** to Applications, done. Installs from the release
+DMG get automatic updates via [Conductor](https://github.com/ranvel/Conductor)
+— the app ships a `conductor.json` pointing at this repo's `manifest.json`,
+and Conductor handles the rest (verified against the developer's Team ID and
+notarization; no update code lives in the app itself).
+
+**Build from source** (below) remains fully supported, with one caveat: your
+build is signed with *your* identity, not the release Team ID, so Conductor
+will correctly refuse the published updates. To be on the update channel,
+install the release DMG; build-from-source means you own your own updates.
+
 ## Requirements
 
 - macOS 13 (Ventura) or later

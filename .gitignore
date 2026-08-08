@@ -39,3 +39,9 @@ playground.xcworkspace
 # Swift Package Manager
 # Package.resolved
 docs/cici-brief-*.md
+
+# Test harness build output
+Tests/.build/
+
+# release.py pipeline output
+build/
